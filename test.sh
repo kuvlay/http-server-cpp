@@ -1,32 +1,44 @@
 #!/bin/bash
 
-echo "===== Root ====="
-curl -i http://localhost:4221/
+BASE_URL="http://localhost:4221"
+
+echo "==============================="
+echo " HTTP Server Local Test Suite"
+echo "==============================="
 
 echo
-echo "===== Hello ====="
-curl -i http://localhost:4221/hello
+echo "===== Root Route ====="
+curl -i "$BASE_URL/"
 
 echo
-echo "===== Random ====="
-curl -i http://localhost:4221/abcdef
+echo "===== Unknown Route ====="
+curl -i "$BASE_URL/does-not-exist"
 
 echo
-echo "===== Another ====="
-curl -i http://localhost:4221/test123
-
-echo
-echo "===== Echo abc ====="
-curl -i http://localhost:4221/echo/abc
-
-echo
-echo "===== Echo hello ====="
-curl -i http://localhost:4221/echo/hello
-
-echo
-echo "===== Echo CodeCrafters ====="
-curl -i http://localhost:4221/echo/CodeCrafters
+echo "===== Echo Route ====="
+curl -i "$BASE_URL/echo/hello"
 
 echo
 echo "===== Echo Empty ====="
-curl -i http://localhost:4221/echo/
+curl -i "$BASE_URL/echo/"
+
+echo
+echo "===== User-Agent (Default curl) ====="
+curl -i "$BASE_URL/user-agent"
+
+echo
+echo "===== User-Agent (Custom) ====="
+curl -i \
+    -H "User-Agent: AarishBrowser/1.0" \
+    "$BASE_URL/user-agent"
+
+echo
+echo "===== User-Agent (Long Value) ====="
+curl -i \
+    -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36" \
+    "$BASE_URL/user-agent"
+
+echo
+echo "==============================="
+echo " Tests Complete"
+echo "==============================="
