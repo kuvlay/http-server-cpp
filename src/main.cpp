@@ -52,33 +52,54 @@ int main(int argc, char **argv) {
   
   std::cout << "Waiting for a client to connect...\n";
   
-  int client_fd=accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
-  std::cout << "Client connected\n";
-  std::cout << "I AM HERE\n";
-
-  char buffer[1024];
-
-  ssize_t bytes_read = recv(client_fd,buffer,sizeof(buffer),0);
   
-  std::cout << "bytes_read = "
-          << bytes_read
-          << '\n';
-
-if(bytes_read >= 0)
-{
-    buffer[bytes_read] = '\0';
-
-    std::cout << "-------------\n";
-
-    std::cout.write(buffer, bytes_read);
-
-    std::cout << "\n-------------\n";
-}
-
-  const char* response = "HTTP/1.1 200 OK\r\n\r\n";
-  send(client_fd, response, strlen(response), 0);
   
-  close(client_fd);
+  while(true){
+    int client_fd=accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
+    std::cout << "Client connected\n";
+    std::cout << "I AM HERE\n";
+  
+    char buffer[1024];
+  
+    ssize_t bytes_read = recv(client_fd,buffer,sizeof(buffer),0);
+    
+    std::cout << "bytes_read = "
+            << bytes_read
+            << '\n';
+  
+    int first_space =0;
+    while(first_space < bytes_read && buffer[first_space]!=' ') first_space++;
+  
+    int next_space =first_space+1;
+    while(next_space < bytes_read && buffer[next_space]!=' ') next_space++;
+    
+    std::string path(buffer+first_space+1, next_space-first_space-1);
+    std::cout << path << '\n';
+  
+    std::string response;
+  
+    if(path=="/") response = "HTTP/1.1 200 OK\r\n\r\n";
+    else if(path.rfind("/echo/", 0) == 0){
+      std::string body = path.substr(6);
+  
+      response = 
+                            "HTTP/1.1 200 OK\r\n"
+                            "Content-Type: text/plain\r\n"
+                            "Content-Length: " + std::to_string(body.size())+
+                            "\r\n\r\n" +
+                            body;
+      
+      //send(client_fd,response,strlen(response),0);
+  
+    }
+  
+    else response = "HTTP/1.1 404 Not Found\r\n\r\n";
+    
+    send(client_fd, response.c_str(), response.size(), 0);
+  
+    close(client_fd);
+  }
+
   close(server_fd);
 
   return 0;
