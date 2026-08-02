@@ -8,32 +8,60 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <thread>
+#include <fstream>
 
-void wthread_handleClient(int client_fd)
+std::string findPath(std::string request)
 {
-  std::cout << "Worker thread started for client with FD: " << client_fd << "\n";
-
-  // read the request from client
-  char buffer[1024];
-  ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer), 0);
-  std::cout << "data received from client: " << client_fd << ": " << bytes_read << "\n";
-  std::string request(buffer, bytes_read); // request is the full request from the client so it contains everything from get url to http 1.1 nd headers
-
-  // finding url path first word so its easy to check for the request url starting
   int first_space = 0;
-  while (first_space < bytes_read && buffer[first_space] != ' ')
+  while (first_space < request.size() && request[first_space] != ' ')
     first_space++;
 
   int next_space = first_space + 1;
-  while (next_space < bytes_read && buffer[next_space] != ' ')
+  while (next_space < request.size() && request[next_space] != ' ')
     next_space++;
 
-  std::string path(buffer + first_space + 1, next_space - first_space - 1);
-  std::cout << path << '\n';
+  std::string path(request.substr(first_space + 1, next_space - first_space - 1));
 
-  // a body for the response to send back to the client
+  return path;
+}
+
+std::string findAgent(std::string request)
+{
+  // finding header user agent nd its value , packing nd sending back
+  ssize_t start_pos = request.find("User-Agent: ");
+  if (start_pos != std::string::npos)
+  {
+    std::string key = "User-Agent: ";
+    start_pos += key.size();
+
+    ssize_t end_pos = request.find("\r\n", start_pos);
+    std::string body = request.substr(start_pos, end_pos - start_pos);
+    if (body.empty())
+    {
+      return "";
+    }
+    return body;
+  }
+  return "";
+}
+
+bool readFile(const std::string &filepath, std::string &body)
+{
+  std::cout << filepath << '\n';
+  std::ifstream file(filepath);
+  if (!file.is_open())
+    return false;
+
+  body.assign(
+      std::istreambuf_iterator<char>(file),
+      std::istreambuf_iterator<char>());
+
+  return true;
+}
+
+std::string buildResponse(const std::string &path, const std::string &request, const std::string &directory)
+{
   std::string response;
-
   if (path == "/")
   {
     response = "HTTP/1.1 200 OK\r\n\r\n";
@@ -53,28 +81,62 @@ void wthread_handleClient(int client_fd)
 
   else if (path == "/user-agent") // rn they just sent /user agent else we would have used find(user-agent)
   {
-    // finding header user agent nd its value , packing nd sending back
-    ssize_t start_pos = request.find("User-Agent: ");
-    if (start_pos != std::string::npos)
+    std::string body = findAgent(request);
+
+    response = "HTTP/1.1 200 OK\r\n"
+
+               "Content-Type: text/plain\r\n"
+               "Content-Length: " +
+               std::to_string(body.size()) + "\r\n"
+                                             "\r\n" +
+               body;
+  }
+
+  else if (path.find("/files/") == 0)
+  {
+    std::string filename = path.substr(7);
+
+    std::string fullPath = directory + filename;
+
+    std::string body;
+
+    if (readFile(fullPath, body))
     {
-      std::string key = "User-Agent: ";
-      start_pos += key.size();
-
-      ssize_t end_pos = request.find("\r\n", start_pos);
-      std::string body = request.substr(start_pos, end_pos - start_pos);
-
-      response = "HTTP/1.1 200 OK\r\n"
-
-                 "Content-Type: text/plain\r\n"
-                 "Content-Length: " +
-                 std::to_string(body.size()) + "\r\n"
-                                               "\r\n" +
-                 body;
+      response =
+          "HTTP/1.1 200 OK\r\n"
+          "Content-Type: application/octet-stream\r\n"
+          "Content-Length: " +
+          std::to_string(body.size()) +
+          "\r\n\r\n" +
+          body;
+    }
+    else
+    {
+      response = "HTTP/1.1 404 Not Found\r\n\r\n";
     }
   }
 
   else
     response = "HTTP/1.1 404 Not Found\r\n\r\n";
+
+  return response;
+}
+
+void wthread_handleClient(int client_fd, const std::string &directory)
+{
+  std::cout << "Worker thread started for client with FD: " << client_fd << "\n";
+
+  // read the request from client
+  char buffer[1024];
+  ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer), 0);
+  std::cout << "data received from client: " << client_fd << ": " << bytes_read << "\n";
+  std::string request(buffer, bytes_read); // request is the full request from the client so it contains everything from get url to http 1.1 nd headers
+
+  // finding url path first word so its easy to check for the request url starting
+  std::string path = findPath(request);
+
+  // a body for the response to send back to the client
+  std::string response = buildResponse(path, request, directory);
 
   send(client_fd, response.c_str(), response.size(), 0);
 
@@ -137,7 +199,12 @@ int main(int argc, char **argv)
 
     std::cout << "Worker Thread created for client with FD: " << client_fd << "\n";
 
-    std::thread worker(wthread_handleClient, client_fd);
+    std::string directory = "";
+    if (argc == 3 && std::string(argv[1]) == "--directory")
+      directory = argv[2];
+    std::cout << "Directory = " << directory << '\n';
+
+    std::thread worker(wthread_handleClient, client_fd, directory);
 
     worker.detach();
   }
