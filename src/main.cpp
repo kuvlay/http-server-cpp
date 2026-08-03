@@ -11,6 +11,21 @@
 #include <fstream>
 #include <zlib.h>
 
+bool checkConnection(const std::string &request)
+{
+  auto start_pos = request.find("Connection: ");
+  if (start_pos != std::string::npos)
+  {
+    auto end_pos = request.find("\r\n", start_pos);
+    std::string header_value = request.substr(start_pos + 12, end_pos - (start_pos + 12));
+    if (header_value.find("close") != std::string::npos)
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::string findMethod(std::string request)
 {
   std::string method;
@@ -156,66 +171,94 @@ bool writeFile(const std::string &filepath, const std::string &body)
   return true;
 }
 
-std::string buildResponse(const std::string &method, const std::string &path, const std::string &request, const std::string &directory)
+void addHeader(std::string &response, const std::string &key, const std::string &value)
+{
+  response += key + ": " + value + "\r\n";
+}
+
+std::string buildResponse(const std::string &method, const std::string &path, const std::string &request, const std::string &directory, bool shouldClose)
 {
   std::string response;
+
   if (path == "/")
   {
-    response = "HTTP/1.1 200 OK\r\n\r\n";
+    response = "HTTP/1.1 200 OK\r\n";
+
+    if (shouldClose)
+      addHeader(response, "Connection", "close");
+
+    response += "\r\n";
   }
+
   else if (method == "GET" && path.find("/echo/") == 0)
   {
     std::string body = path.substr(6);
 
-    response = "HTTP/1.1 200 OK\r\n"
-               "Content-Type: text/plain\r\n";
+    response = "HTTP/1.1 200 OK\r\n";
+
+    addHeader(response, "Content-Type", "text/plain");
+
+    if (shouldClose)
+      addHeader(response, "Connection", "close");
 
     if (acceptsGzip(request))
     {
-      response += "Content-Encoding: gzip\r\n";
+      addHeader(response, "Content-Encoding", "gzip");
       body = gzipCompress(body);
     }
-    response +=
-        "Content-Length: " +
-        std::to_string(body.size()) +
-        "\r\n\r\n" +
-        body;
+
+    addHeader(response, "Content-Length", std::to_string(body.size()));
+
+    response += "\r\n";
+    response += body;
   }
 
-  else if (method == "GET" && path == "/user-agent") // rn they just sent /user agent else we would have used find(user-agent)
+  else if (method == "GET" && path == "/user-agent")
   {
     std::string body = findAgent(request);
 
-    response = "HTTP/1.1 200 OK\r\n"
+    response = "HTTP/1.1 200 OK\r\n";
 
-               "Content-Type: text/plain\r\n"
-               "Content-Length: " +
-               std::to_string(body.size()) + "\r\n"
-                                             "\r\n" +
-               body;
+    addHeader(response, "Content-Type", "text/plain");
+
+    if (shouldClose)
+      addHeader(response, "Connection", "close");
+
+    addHeader(response, "Content-Length", std::to_string(body.size()));
+
+    response += "\r\n";
+    response += body;
   }
 
   else if (method == "GET" && path.find("/files/") == 0)
   {
     std::string filename = path.substr(7);
-
     std::string fullPath = directory + filename;
 
     std::string body;
 
     if (readFile(fullPath, body))
     {
-      response =
-          "HTTP/1.1 200 OK\r\n"
-          "Content-Type: application/octet-stream\r\n"
-          "Content-Length: " +
-          std::to_string(body.size()) +
-          "\r\n\r\n" +
-          body;
+      response = "HTTP/1.1 200 OK\r\n";
+
+      addHeader(response, "Content-Type", "application/octet-stream");
+
+      if (shouldClose)
+        addHeader(response, "Connection", "close");
+
+      addHeader(response, "Content-Length", std::to_string(body.size()));
+
+      response += "\r\n";
+      response += body;
     }
     else
     {
-      response = "HTTP/1.1 404 Not Found\r\n\r\n";
+      response = "HTTP/1.1 404 Not Found\r\n";
+
+      if (shouldClose)
+        addHeader(response, "Connection", "close");
+
+      response += "\r\n";
     }
   }
 
@@ -227,16 +270,33 @@ std::string buildResponse(const std::string &method, const std::string &path, co
 
     if (writeFile(fullPath, body))
     {
-      response = "HTTP/1.1 201 Created\r\n\r\n";
+      response = "HTTP/1.1 201 Created\r\n";
+
+      if (shouldClose)
+        addHeader(response, "Connection", "close");
+
+      response += "\r\n";
     }
     else
     {
-      response = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
+      response = "HTTP/1.1 500 Internal Server Error\r\n";
+
+      if (shouldClose)
+        addHeader(response, "Connection", "close");
+
+      response += "\r\n";
     }
   }
 
   else
-    response = "HTTP/1.1 404 Not Found\r\n\r\n";
+  {
+    response = "HTTP/1.1 404 Not Found\r\n";
+
+    if (shouldClose)
+      addHeader(response, "Connection", "close");
+
+    response += "\r\n";
+  }
 
   return response;
 }
@@ -246,19 +306,35 @@ void wthread_handleClient(int client_fd, const std::string &directory)
   std::cout << "Worker thread started for client with FD: " << client_fd << "\n";
 
   // read the request from client
-  char buffer[1024];
-  ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer), 0);
-  std::cout << "data received from client: " << client_fd << ": " << bytes_read << "\n";
-  std::string request(buffer, bytes_read); // request is the full request from the client so it contains everything from get url to http 1.1 nd headers
+  while (true)
+  {
+    char buffer[1024];
+    ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer), 0);
+    std::cout << "data received from client: " << client_fd << ": " << bytes_read << "\n";
 
-  // finding url path first word so its easy to check for the request url starting
-  std::string path = findPath(request);
-  std::string method = findMethod(request);
+    if (bytes_read <= 0)
+    {
+      std::cout << "Client with FD: " << client_fd << " disconnected or error occurred\n";
+      break;
+    }
 
-  // a body for the response to send back to the client
-  std::string response = buildResponse(method, path, request, directory);
+    std::string request(buffer, bytes_read); // request is the full request from the client so it contains everything from get url to http 1.1 nd headers
 
-  send(client_fd, response.c_str(), response.size(), 0);
+    // finding url path first word so its easy to check for the request url starting
+    std::string path = findPath(request);
+    std::string method = findMethod(request);
+    bool closeConnection = checkConnection(request);
+
+    // a body for the response to send back to the client
+    std::string response = buildResponse(method, path, request, directory, closeConnection);
+
+    send(client_fd, response.c_str(), response.size(), 0);
+    if (closeConnection)
+    {
+      std::cout << "Closing connection with client FD: " << client_fd << "\n";
+      break;
+    }
+  }
 
   close(client_fd);
 
