@@ -9,6 +9,17 @@
 #include <netdb.h>
 #include <thread>
 #include <fstream>
+#include <zlib.h>
+
+std::string findMethod(std::string request)
+{
+  std::string method;
+  int first_space = 0;
+  while (first_space < request.size() && request[first_space] != ' ')
+    first_space++;
+  method = request.substr(0, first_space);
+  return method;
+}
 
 std::string findPath(std::string request)
 {
@@ -28,13 +39,13 @@ std::string findPath(std::string request)
 std::string findAgent(std::string request)
 {
   // finding header user agent nd its value , packing nd sending back
-  ssize_t start_pos = request.find("User-Agent: ");
+  auto start_pos = request.find("User-Agent: ");
   if (start_pos != std::string::npos)
   {
     std::string key = "User-Agent: ";
     start_pos += key.size();
 
-    ssize_t end_pos = request.find("\r\n", start_pos);
+    auto end_pos = request.find("\r\n", start_pos);
     std::string body = request.substr(start_pos, end_pos - start_pos);
     if (body.empty())
     {
@@ -43,6 +54,81 @@ std::string findAgent(std::string request)
     return body;
   }
   return "";
+}
+
+std::string findBody(std::string request)
+{
+  auto start_pos = request.find("\r\n\r\n");
+  if (start_pos != std::string::npos)
+  {
+    start_pos += 4; // Move past the "\r\n\r\n"
+    std::string body = request.substr(start_pos);
+    return body;
+  }
+  return "";
+}
+
+bool acceptsGzip(const std::string &request)
+{
+  auto start_pos = request.find("Accept-Encoding: ");
+  if (start_pos != std::string::npos)
+  {
+    auto end_pos = request.find("\r\n", start_pos);
+    std::string header_value = request.substr(start_pos + 17, end_pos - (start_pos + 17));
+    if (header_value.find("gzip") != std::string::npos)
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string gzipCompress(const std::string &input)
+{
+  z_stream zs{};
+  std::string output;
+
+  if (deflateInit2(
+          &zs,
+          Z_DEFAULT_COMPRESSION, // around 6 good speed nd compression ratio
+          Z_DEFLATED,
+          MAX_WBITS + 16, // +16 => gzip instead of zlib
+          8,
+          Z_DEFAULT_STRATEGY) != Z_OK)
+  {
+    return "";
+  }
+
+  // just finding the index of input string, reinterpret cast means treat bytef nd char* same, const cast removes cont
+  zs.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(input.data()));
+  zs.avail_in = input.size();
+
+  // 32 kb standard
+  char buffer[32768];
+
+  int ret;
+
+  do
+  {
+    zs.next_out = reinterpret_cast<Bytef *>(buffer);
+    zs.avail_out = sizeof(buffer);
+
+    // deflate return -1 if error, 0 if ok, 1 if stream end
+    ret = deflate(&zs, Z_FINISH);
+
+    size_t bytes_written = sizeof(buffer) - zs.avail_out;
+
+    output.append(buffer, bytes_written);
+
+  } while (ret == Z_OK); // continue till ret ==0
+
+  // clear memeory
+  deflateEnd(&zs);
+
+  if (ret != Z_STREAM_END)
+    return "";
+
+  return output;
 }
 
 bool readFile(const std::string &filepath, std::string &body)
@@ -59,27 +145,44 @@ bool readFile(const std::string &filepath, std::string &body)
   return true;
 }
 
-std::string buildResponse(const std::string &path, const std::string &request, const std::string &directory)
+bool writeFile(const std::string &filepath, const std::string &body)
+{
+  std::cout << "write file called\n";
+  std::ofstream file(filepath);
+  if (!file.is_open())
+    return false;
+
+  file << body;
+  return true;
+}
+
+std::string buildResponse(const std::string &method, const std::string &path, const std::string &request, const std::string &directory)
 {
   std::string response;
   if (path == "/")
   {
     response = "HTTP/1.1 200 OK\r\n\r\n";
   }
-  else if (path.find("/echo/") == 0)
+  else if (method == "GET" && path.find("/echo/") == 0)
   {
     std::string body = path.substr(6);
 
-    response =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/plain\r\n"
+    response = "HTTP/1.1 200 OK\r\n"
+               "Content-Type: text/plain\r\n";
+
+    if (acceptsGzip(request))
+    {
+      response += "Content-Encoding: gzip\r\n";
+      body = gzipCompress(body);
+    }
+    response +=
         "Content-Length: " +
         std::to_string(body.size()) +
         "\r\n\r\n" +
         body;
   }
 
-  else if (path == "/user-agent") // rn they just sent /user agent else we would have used find(user-agent)
+  else if (method == "GET" && path == "/user-agent") // rn they just sent /user agent else we would have used find(user-agent)
   {
     std::string body = findAgent(request);
 
@@ -92,7 +195,7 @@ std::string buildResponse(const std::string &path, const std::string &request, c
                body;
   }
 
-  else if (path.find("/files/") == 0)
+  else if (method == "GET" && path.find("/files/") == 0)
   {
     std::string filename = path.substr(7);
 
@@ -116,6 +219,22 @@ std::string buildResponse(const std::string &path, const std::string &request, c
     }
   }
 
+  else if (method == "POST" && path.find("/files/") == 0)
+  {
+    std::string filename = path.substr(7);
+    std::string fullPath = directory + filename;
+    std::string body = findBody(request);
+
+    if (writeFile(fullPath, body))
+    {
+      response = "HTTP/1.1 201 Created\r\n\r\n";
+    }
+    else
+    {
+      response = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
+    }
+  }
+
   else
     response = "HTTP/1.1 404 Not Found\r\n\r\n";
 
@@ -134,9 +253,10 @@ void wthread_handleClient(int client_fd, const std::string &directory)
 
   // finding url path first word so its easy to check for the request url starting
   std::string path = findPath(request);
+  std::string method = findMethod(request);
 
   // a body for the response to send back to the client
-  std::string response = buildResponse(path, request, directory);
+  std::string response = buildResponse(method, path, request, directory);
 
   send(client_fd, response.c_str(), response.size(), 0);
 
@@ -191,6 +311,11 @@ int main(int argc, char **argv)
 
   std::cout << "Waiting for a client to connect...\n";
 
+  std::string directory = "";
+  if (argc == 3 && std::string(argv[1]) == "--directory")
+    directory = argv[2];
+  std::cout << "Directory = " << directory << '\n';
+
   // check for all clients/server doesnt close connection byself
   while (true)
   {
@@ -198,11 +323,6 @@ int main(int argc, char **argv)
     std::cout << "Accepted connected\n";
 
     std::cout << "Worker Thread created for client with FD: " << client_fd << "\n";
-
-    std::string directory = "";
-    if (argc == 3 && std::string(argv[1]) == "--directory")
-      directory = argv[2];
-    std::cout << "Directory = " << directory << '\n';
 
     std::thread worker(wthread_handleClient, client_fd, directory);
 
