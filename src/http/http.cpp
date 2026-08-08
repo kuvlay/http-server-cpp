@@ -121,7 +121,7 @@ void wthread_handleClient(int client_fd, const std::string &directory)
 
         std::string request(buffer, bytes_read);           // convert into string
         HttpRequest parsedRequest = parseRequest(request); // parse nd store in httprequest struct
-        
+
         // check for websocket upgrade request and handle it
         if (isWebSocketUpgrade(parsedRequest))
         {
@@ -132,6 +132,8 @@ void wthread_handleClient(int client_fd, const std::string &directory)
 
             send(client_fd, raw.data(), raw.size(), 0);
 
+            handleWebSocket(client_fd);
+            
             return; // exit the function to stop handling the client in this thread
         }
 

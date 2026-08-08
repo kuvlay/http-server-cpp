@@ -11,3 +11,5 @@ std::string generateWebSocketAcceptKey(
 
 HttpResponse buildWebSocketHandshakeResponse(
     const HttpRequest &request);
+
+void handleWebSocket(int client_fd);
