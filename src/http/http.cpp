@@ -3,8 +3,41 @@
 #include <sstream>
 #include <sys/socket.h>
 #include <unistd.h>
-#include "file/file.hpp"
-#include "gzip/gzip.hpp"
+#include "socket/websocket.hpp"
+#include "http_types.hpp"
+#include "routes.hpp"
+
+std::string serializeResponse(const HttpResponse &response)
+{
+    std::string raw;
+
+    raw.reserve(
+        response.version.size() +
+        response.statusMessage.size() +
+        response.body.size() +
+        response.headers.size() * 32);
+
+    raw += response.version;
+    raw += ' ';
+    raw += std::to_string(response.statusCode);
+    raw += ' ';
+    raw += response.statusMessage;
+    raw += "\r\n";
+
+    for (const auto &[key, value] : response.headers)
+    {
+        raw += key;
+        raw += ": ";
+        raw += value;
+        raw += "\r\n";
+    }
+
+    raw += "\r\n";
+
+    raw += response.body;
+
+    return raw;
+}
 
 HttpRequest parseRequest(const std::string &request)
 {
@@ -50,139 +83,24 @@ HttpRequest parseRequest(const std::string &request)
     return parsedRequest;
 }
 
-void addHeader(std::string &response, const std::string &key, const std::string &value)
+HttpResponse buildResponse(const HttpRequest &request, const std::string &directory, bool shouldClose)
 {
-    response += key + ": " + value + "\r\n";
-}
-
-std::string buildResponse(const HttpRequest &request, const std::string &directory, bool shouldClose)
-{
-    std::string response;
-    const auto connectionHeader = request.headers.find("Connection");
-    const auto acceptEncodingHeader = request.headers.find("Accept-Encoding");
-    const auto userAgentHeader = request.headers.find("User-Agent");
-
     if (request.path == "/")
-    {
-        response = "HTTP/1.1 200 OK\r\n";
+        return handleRoot(shouldClose);
 
-        if (shouldClose)
-            addHeader(response, "Connection", "close");
+    if (request.method == "GET" && request.path.rfind("/echo/", 0) == 0)
+        return handleEcho(request, shouldClose);
 
-        response += "\r\n";
-    }
+    if (request.method == "GET" && request.path == "/user-agent")
+        return handleUserAgent(request, shouldClose);
 
-    else if (request.method == "GET" && request.path.find("/echo/") == 0)
-    {
-        std::string body = request.path.substr(6);
+    if (request.method == "GET" && request.path.rfind("/files/", 0) == 0)
+        return handleGetFile(request, directory, shouldClose);
 
-        response = "HTTP/1.1 200 OK\r\n";
+    if (request.method == "POST" && request.path.rfind("/files/", 0) == 0)
+        return handlePostFile(request, directory, shouldClose);
 
-        addHeader(response, "Content-Type", "text/plain");
-
-        if (shouldClose)
-            addHeader(response, "Connection", "close");
-
-        if (acceptEncodingHeader != request.headers.end() && acceptEncodingHeader->second.find("gzip") != std::string::npos)
-        {
-            addHeader(response, "Content-Encoding", "gzip");
-            body = gzipCompress(body);
-        }
-
-        addHeader(response, "Content-Length", std::to_string(body.size()));
-
-        response += "\r\n";
-        response += body;
-    }
-
-    else if (request.method == "GET" && request.path == "/user-agent")
-    {
-        std::string body;
-        if (userAgentHeader != request.headers.end())
-            body = userAgentHeader->second;
-
-        response = "HTTP/1.1 200 OK\r\n";
-
-        addHeader(response, "Content-Type", "text/plain");
-
-        if (shouldClose)
-            addHeader(response, "Connection", "close");
-
-        addHeader(response, "Content-Length", std::to_string(body.size()));
-
-        response += "\r\n";
-        response += body;
-    }
-
-    else if (request.method == "GET" && request.path.find("/files/") == 0)
-    {
-        std::string filename = request.path.substr(7);
-        std::string fullPath = directory + filename;
-
-        std::string body;
-
-        if (readFile(fullPath, body))
-        {
-            response = "HTTP/1.1 200 OK\r\n";
-
-            addHeader(response, "Content-Type", "application/octet-stream");
-
-            if (shouldClose)
-                addHeader(response, "Connection", "close");
-
-            addHeader(response, "Content-Length", std::to_string(body.size()));
-
-            response += "\r\n";
-            response += body;
-        }
-        else
-        {
-            response = "HTTP/1.1 404 Not Found\r\n";
-
-            if (shouldClose)
-                addHeader(response, "Connection", "close");
-
-            response += "\r\n";
-        }
-    }
-
-    else if (request.method == "POST" && request.path.find("/files/") == 0)
-    {
-        std::string filename = request.path.substr(7);
-        std::string fullPath = directory + filename;
-        std::string body = request.body;
-
-        if (writeFile(fullPath, body))
-        {
-            response = "HTTP/1.1 201 Created\r\n";
-
-            if (shouldClose)
-                addHeader(response, "Connection", "close");
-
-            response += "\r\n";
-        }
-        else
-        {
-            response = "HTTP/1.1 500 Internal Server Error\r\n";
-
-            if (shouldClose)
-                addHeader(response, "Connection", "close");
-
-            response += "\r\n";
-        }
-    }
-
-    else
-    {
-        response = "HTTP/1.1 404 Not Found\r\n";
-
-        if (shouldClose)
-            addHeader(response, "Connection", "close");
-
-        response += "\r\n";
-    }
-
-    return response;
+    return handleNotFound(shouldClose);
 }
 
 void wthread_handleClient(int client_fd, const std::string &directory)
@@ -201,13 +119,29 @@ void wthread_handleClient(int client_fd, const std::string &directory)
             break;
         }
 
-        std::string request(buffer, bytes_read);
-        HttpRequest parsedRequest = parseRequest(request);
+        std::string request(buffer, bytes_read);           // convert into string
+        HttpRequest parsedRequest = parseRequest(request); // parse nd store in httprequest struct
+        
+        // check for websocket upgrade request and handle it
+        if (isWebSocketUpgrade(parsedRequest))
+        {
+
+            HttpResponse response = buildWebSocketHandshakeResponse(parsedRequest);
+
+            std::string raw = serializeResponse(response);
+
+            send(client_fd, raw.data(), raw.size(), 0);
+
+            return; // exit the function to stop handling the client in this thread
+        }
+
+        // check for http close connection header and close connection if present
         bool closeConnection = parsedRequest.headers.find("Connection") != parsedRequest.headers.end() && parsedRequest.headers.find("Connection")->second.find("close") != std::string::npos;
 
-        std::string response = buildResponse(parsedRequest, directory, closeConnection);
+        HttpResponse response = buildResponse(parsedRequest, directory, closeConnection);
+        std::string raw = serializeResponse(response);
+        send(client_fd, raw.data(), raw.size(), 0);
 
-        send(client_fd, response.c_str(), response.size(), 0);
         if (closeConnection)
         {
             std::cout << "Closing connection with client FD: " << client_fd << "\n";
