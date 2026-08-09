@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Test</title>
+</head>
+<body>
+
+<h2>WebSocket Test</h2>
+
+<button onclick="testHello()">Test Hello</button>
+<button onclick="test125()">Test 125 Bytes</button>
+<button onclick="test126()">Test 126 Bytes</button>
+
+<pre id="output"></pre>
+
+<script>
+const output = document.getElementById("output");
+
+function log(message) {
+    output.textContent += message + "\n";
+}
+
+function test(message, name) {
+    const ws = new WebSocket("ws://localhost:4221");
+
+    ws.onopen = () => {
+        log("Connected");
+        log("Sending: " + name);
+
+        ws.send(message);
+    };
+
+    ws.onmessage = (event) => {
+        log("Received " + event.data.length + " bytes");
+
+        if (event.data === message) {
+            log("PASS: " + name);
+        } else {
+            log("FAIL: " + name);
+        }
+
+        ws.close();
+    };
+
+    ws.onerror = () => {
+        log("ERROR: WebSocket connection failed");
+    };
+}
+
+function testHello() {
+    test("Hello", "Hello");
+}
+
+function test125() {
+    test("A".repeat(125), "125 bytes");
+}
+
+function test126() {
+    test("B".repeat(126), "126 bytes");
+}
+</script>
+
+</body>
+</html>

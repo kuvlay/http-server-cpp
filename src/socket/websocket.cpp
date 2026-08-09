@@ -70,13 +70,63 @@ void readPayload(int &client_fd, WebSocketFrame &frame)
     recv(client_fd, frame.payload.data(), frame.payload.size(), 0);
 }
 
-void unmaskPayload(int &client_fd, WebSocketFrame &frame)
+void unmaskPayload(WebSocketFrame &frame)
 {
-    for (int i = 0; i < frame.payload.size(); i++)
+    for (size_t i = 0; i < frame.payload.size(); i++)
     {
         frame.payload[i] ^= frame.maskingKey[i % 4];
     }
 }
+
+void sendFrame(int client_fd, uint8_t opcode, const std::vector<uint8_t> &payload)
+{
+    uint8_t header[2];
+
+    header[0] = 0x80 | opcode;
+    
+    uint64_t length = payload.size();
+
+    if(length <= 125)
+    {
+        header[1] = length;
+        send(client_fd, header, 2, 0);
+    }
+    else if (length <= 65535)
+    {
+        header[1] = 126;
+        uint16_t extendedLen = htons(length);
+        send(client_fd, header, 2, 0);
+        send(client_fd, &extendedLen, sizeof(extendedLen), 0);
+    }
+    else
+    {
+        header[1] = 127;
+        uint8_t extendedLength[8];
+
+        extendedLength[0] = (length >> 56) & 0xFF;
+        extendedLength[1] = (length >> 48) & 0xFF;
+        extendedLength[2] = (length >> 40) & 0xFF;
+        extendedLength[3] = (length >> 32) & 0xFF;
+        extendedLength[4] = (length >> 24) & 0xFF;
+        extendedLength[5] = (length >> 16) & 0xFF;
+        extendedLength[6] = (length >> 8) & 0xFF;
+        extendedLength[7] = length & 0xFF;
+
+        send(client_fd, header, 2, 0);
+        send(client_fd, extendedLength, sizeof(extendedLength), 0);
+    }
+    
+
+    if (!payload.empty())
+    {
+        send(
+            client_fd,
+            payload.data(),
+            payload.size(),
+            0);
+    }
+}
+
 WebSocketFrame readFrame(int client_fd)
 {
     WebSocketFrame frame;
@@ -88,9 +138,38 @@ WebSocketFrame readFrame(int client_fd)
     readPayload(client_fd, frame);
 
     if (frame.masked)
-        unmaskPayload(client_fd, frame);
-    
+        unmaskPayload(frame);
+
     return frame;
+}
+
+void handleFrame(int client_fd, const WebSocketFrame &frame)
+{
+    uint8_t opcode = frame.opcode;
+
+    switch (opcode)
+    {
+    case 0x1: // text frame
+        std::cout << "Received text frame: " << std::string(frame.payload.begin(), frame.payload.end()) << std::endl;
+        sendFrame(client_fd, opcode, frame.payload);
+        break;
+    case 0x2: // binary frame
+        std::cout << "Received binary frame of size: " << frame.payload.size() << std::endl;
+        break;
+    case 0x8: // connection close
+        std::cout << "Received close frame" << std::endl;
+        return;
+    case 0x9: // ping
+        std::cout << "Received ping frame" << std::endl;
+        sendFrame(client_fd, 0xA, frame.payload); // send pong
+        return;
+    case 0xA: // pong
+        std::cout << "Received pong frame" << std::endl;
+        return;
+    default:
+        std::cerr << "Unknown opcode: " << static_cast<int>(opcode) << std::endl;
+        return;
+    }
 }
 
 HttpResponse buildWebSocketHandshakeResponse(const HttpRequest &request)
@@ -146,5 +225,7 @@ void handleWebSocket(int client_fd)
     while (true)
     {
         WebSocketFrame frame = readFrame(client_fd);
+
+        handleFrame(client_fd, frame);
     }
 }
