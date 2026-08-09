@@ -1,31 +1,99 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>WebSocket Test</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Server Test</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+        }
+
+        button {
+            padding: 10px 16px;
+            margin: 5px;
+            cursor: pointer;
+        }
+
+        #output {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ccc;
+            white-space: pre-wrap;
+            font-family: monospace;
+        }
+    </style>
 </head>
+
 <body>
 
-<h2>WebSocket Test</h2>
+<h1>WebSocket Server Test</h1>
 
 <button onclick="testHello()">Test Hello</button>
 <button onclick="test125()">Test 125 Bytes</button>
 <button onclick="test126()">Test 126 Bytes</button>
+<button onclick="testClose()">Test Close</button>
 
-<pre id="output"></pre>
+<div id="output"></div>
 
 <script>
+
 const output = document.getElementById("output");
 
 function log(message) {
     output.textContent += message + "\n";
 }
 
-function test(message, name) {
-    const ws = new WebSocket("ws://localhost:4221");
+function clearOutput() {
+    output.textContent = "";
+}
+
+function createSocket() {
+    return new WebSocket("ws://localhost:4221");
+}
+
+function testHello() {
+    clearOutput();
+
+    const ws = createSocket();
 
     ws.onopen = () => {
         log("Connected");
-        log("Sending: " + name);
+        log("Sending: Hello");
+
+        ws.send("Hello");
+    };
+
+    ws.onmessage = (event) => {
+        log("Received " + event.data.length + " bytes");
+
+        if (event.data === "Hello") {
+            log("PASS: Hello");
+        } else {
+            log("FAIL: Expected Hello");
+        }
+
+        ws.close();
+    };
+
+    ws.onerror = () => {
+        log("ERROR: WebSocket");
+    };
+}
+
+function test125() {
+    clearOutput();
+
+    const ws = createSocket();
+    const message = "A".repeat(125);
+
+    ws.onopen = () => {
+        log("Connected");
+        log("Sending: 125 bytes");
 
         ws.send(message);
     };
@@ -33,31 +101,77 @@ function test(message, name) {
     ws.onmessage = (event) => {
         log("Received " + event.data.length + " bytes");
 
-        if (event.data === message) {
-            log("PASS: " + name);
+        if (
+            event.data.length === 125 &&
+            event.data === message
+        ) {
+            log("PASS: 125 bytes");
         } else {
-            log("FAIL: " + name);
+            log("FAIL: 125 bytes");
         }
 
         ws.close();
     };
 
     ws.onerror = () => {
-        log("ERROR: WebSocket connection failed");
+        log("ERROR: WebSocket");
     };
 }
 
-function testHello() {
-    test("Hello", "Hello");
-}
-
-function test125() {
-    test("A".repeat(125), "125 bytes");
-}
-
 function test126() {
-    test("B".repeat(126), "126 bytes");
+    clearOutput();
+
+    const ws = createSocket();
+    const message = "B".repeat(126);
+
+    ws.onopen = () => {
+        log("Connected");
+        log("Sending: 126 bytes");
+
+        ws.send(message);
+    };
+
+    ws.onmessage = (event) => {
+        log("Received " + event.data.length + " bytes");
+
+        if (
+            event.data.length === 126 &&
+            event.data === message
+        ) {
+            log("PASS: 126 bytes");
+        } else {
+            log("FAIL: 126 bytes");
+        }
+
+        ws.close();
+    };
+
+    ws.onerror = () => {
+        log("ERROR: WebSocket");
+    };
 }
+
+function testClose() {
+    clearOutput();
+
+    const ws = createSocket();
+
+    ws.onopen = () => {
+        log("Connected");
+        log("Closing connection...");
+
+        ws.close();
+    };
+
+    ws.onclose = () => {
+        log("PASS: Close handshake completed");
+    };
+
+    ws.onerror = () => {
+        log("ERROR: WebSocket");
+    };
+}
+
 </script>
 
 </body>
