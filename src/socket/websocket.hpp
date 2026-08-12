@@ -5,49 +5,51 @@
 #include <string>
 #include <vector>
 
+#include <openssl/ssl.h>
+
 #include "../http/http_types.hpp"
 #include "websocket_frame.hpp"
 
 bool recvAll(
-    int client_fd,
+    SSL *ssl,
     void *buffer,
     size_t length);
 
 bool sendAll(
-    int client_fd,
+    SSL *ssl,
     const void *buffer,
     size_t length);
 
 bool readHeader(
-    int client_fd,
+    SSL *ssl,
     WebSocketFrame &frame);
 
 bool readExtendedLen(
-    int client_fd,
+    SSL *ssl,
     WebSocketFrame &frame);
 
 bool readMaskingKey(
-    int client_fd,
+    SSL *ssl,
     WebSocketFrame &frame);
 
 bool readPayload(
-    int client_fd,
+    SSL *ssl,
     WebSocketFrame &frame);
 
 void unmaskPayload(
     WebSocketFrame &frame);
 
 bool readFrame(
-    int client_fd,
+    SSL *ssl,
     WebSocketFrame &frame);
 
 bool sendFrame(
-    int client_fd,
+    SSL *ssl,
     uint8_t opcode,
     const std::vector<uint8_t> &payload);
 
 bool handleFrame(
-    int client_fd,
+    SSL *ssl,
     const WebSocketFrame &frame);
 
 HttpResponse buildWebSocketHandshakeResponse(
@@ -59,4 +61,4 @@ std::string generateWebSocketAcceptKey(
 bool isWebSocketUpgrade(
     const HttpRequest &parsedRequest);
 
-void handleWebSocket(int client_fd);
+void handleWebSocket(SSL *ssl);

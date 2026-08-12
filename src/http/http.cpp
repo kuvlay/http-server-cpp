@@ -6,6 +6,8 @@
 #include "socket/websocket.hpp"
 #include "http_types.hpp"
 #include "routes.hpp"
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 std::string serializeResponse(const HttpResponse &response)
 {
@@ -103,55 +105,273 @@ HttpResponse buildResponse(const HttpRequest &request, const std::string &direct
     return handleNotFound(shouldClose);
 }
 
-void wthread_handleClient(int client_fd, const std::string &directory)
+bool tryExtractCompleteRequest(std::string &receiveBuffer, std::string &request)
 {
-    std::cout << "Worker thread started for client with FD: " << client_fd << "\n";
+    std::size_t requestEnd =
+        receiveBuffer.find("\r\n\r\n");
+
+    if (requestEnd == std::string::npos)
+    {
+        // headers are incomplete
+        return false;
+    }
+
+    // find content length
+    std::size_t contentLength = 0;
+
+    std::size_t contentLengthPos =
+        receiveBuffer.find("Content-Length:");
+
+    if (contentLengthPos != std::string::npos &&
+        contentLengthPos < requestEnd)
+    {
+        std::size_t valueStart =
+            contentLengthPos + 15;
+
+        std::size_t valueEnd =
+            receiveBuffer.find("\r\n", valueStart);
+
+        if (valueEnd != std::string::npos)
+        {
+            contentLength = std::stoul(
+                receiveBuffer.substr(
+                    valueStart,
+                    valueEnd - valueStart));
+        }
+    }
+
+    std::size_t totalRequestSize =
+        requestEnd + 4 + contentLength;
+
+    if (receiveBuffer.size() < totalRequestSize)
+    {
+        // haders arrived, but body hasn't atleast not completely
+        return false;
+    }
+
+    // then extract one full request
+    request =
+        receiveBuffer.substr(
+            0,
+            totalRequestSize);
+
+    // remove the rquest frmo buffer
+
+    receiveBuffer.erase(
+        0,
+        totalRequestSize);
+
+    return true;
+}
+
+void wthread_handleClient(int client_fd, SSL *ssl, const std::string &directory)
+{
+
+    std::cout << "Worker thread started for client with FD: "
+              << client_fd << "\n";
+
+    if (SSL_accept(ssl) <= 0)
+    {
+        std::cerr << "TLS handshake failed\n";
+
+        SSL_free(ssl);
+        close(client_fd);
+
+        return;
+    }
+
+    std::cout << "TLS handshake successful for client FD: "
+              << client_fd << "\n";
+
+    // this survives across multiple SSL_read() calls.
+    std::string receiveBuffer;
+    bool terminateConnection = false;
+
+    // outer loop-read more bytes from the network
 
     while (true)
     {
         char buffer[1024];
-        ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer), 0);
-        std::cout << "data received from client: " << client_fd << ": " << bytes_read << "\n";
+
+        int bytes_read =
+            SSL_read(
+                ssl,
+                buffer,
+                sizeof(buffer));
+
+        std::cout
+            << "data received from client: "
+            << client_fd
+            << ": "
+            << bytes_read
+            << "\n";
 
         if (bytes_read <= 0)
         {
-            std::cout << "Client with FD: " << client_fd << " disconnected or error occurred\n";
+            int ssl_error =
+                SSL_get_error(
+                    ssl,
+                    bytes_read);
+
+            if (ssl_error == SSL_ERROR_ZERO_RETURN)
+            {
+                std::cout
+                    << "TLS connection closed by client\n";
+            }
+            else
+            {
+                std::cerr
+                    << "SSL_read failed, error: "
+                    << ssl_error
+                    << "\n";
+            }
+
             break;
         }
 
-        std::string request(buffer, bytes_read);           // convert into string
-        HttpRequest parsedRequest = parseRequest(request); // parse nd store in httprequest struct
+        receiveBuffer.append(
+            buffer,
+            bytes_read);
 
-        // check for websocket upgrade request and handle it
-        if (isWebSocketUpgrade(parsedRequest))
+        // inner loop- process each &every complete request currently
+
+        while (true)
         {
+            std::string request;
 
-            HttpResponse response = buildWebSocketHandshakeResponse(parsedRequest);
+            // get one complete request
+            bool completeRequest =
+                tryExtractCompleteRequest(
+                    receiveBuffer,
+                    request);
 
-            std::string raw = serializeResponse(response);
+            if (!completeRequest)
+            {
+                break;
+            }
 
-            send(client_fd, raw.data(), raw.size(), 0);
+            // parse nd store in httprequest structure
+            HttpRequest parsedRequest =
+                parseRequest(request);
 
-            handleWebSocket(client_fd);
-            
-            return; // exit the function to stop handling the client in this thread
+            // websocket connection chekc
+            if (isWebSocketUpgrade(parsedRequest))
+            {
+                HttpResponse response =
+                    buildWebSocketHandshakeResponse(
+                        parsedRequest);
+
+                std::string raw =
+                    serializeResponse(response);
+
+                // reliably send handshake response
+                size_t totalSent = 0;
+
+                while (totalSent < raw.size())
+                {
+                    int bytesSent =
+                        SSL_write(
+                            ssl,
+                            raw.data() + totalSent,
+                            raw.size() - totalSent);
+
+                    if (bytesSent <= 0)
+                    {
+                        int ssl_error =
+                            SSL_get_error(
+                                ssl,
+                                bytesSent);
+
+                        std::cerr
+                            << "SSL_write failed, error: "
+                            << ssl_error
+                            << "\n";
+
+                        break;
+                    }
+
+                    totalSent += bytesSent;
+                }
+
+                // we sent 101 response now swithcing protocol/ws
+                handleWebSocket(ssl);
+                terminateConnection = true;
+
+                break;
+            }
+
+            // check close http
+            bool closeConnection =
+                parsedRequest.headers.find("Connection") != parsedRequest.headers.end() &&
+                parsedRequest.headers
+                        .find("Connection")
+                        ->second
+                        .find("close") != std::string::npos;
+
+            // build http reaonse
+            HttpResponse response =
+                buildResponse(
+                    parsedRequest,
+                    directory,
+                    closeConnection);
+
+            std::string raw =
+                serializeResponse(response);
+
+            /// ssl write
+            size_t totalSent = 0;
+
+            while (totalSent < raw.size())
+            {
+                int bytesSent =
+                    SSL_write(
+                        ssl,
+                        raw.data() + totalSent,
+                        raw.size() - totalSent);
+
+                if (bytesSent <= 0)
+                {
+                    int ssl_error =
+                        SSL_get_error(
+                            ssl,
+                            bytesSent);
+
+                    std::cerr
+                        << "SSL_write failed, error: "
+                        << ssl_error
+                        << "\n";
+
+                    break;
+                }
+
+                totalSent += bytesSent;
+            }
+
+            // since our logic states if close conneciton we already sent a close conneciton response
+            // now close the connection
+            if (closeConnection)
+            {
+                std::cout
+                    << "Closing connection with client FD: "
+                    << client_fd
+                    << "\n";
+
+                break;
+            }
         }
-
-        // check for http close connection header and close connection if present
-        bool closeConnection = parsedRequest.headers.find("Connection") != parsedRequest.headers.end() && parsedRequest.headers.find("Connection")->second.find("close") != std::string::npos;
-
-        HttpResponse response = buildResponse(parsedRequest, directory, closeConnection);
-        std::string raw = serializeResponse(response);
-        send(client_fd, raw.data(), raw.size(), 0);
-
-        if (closeConnection)
+        if (terminateConnection)
         {
-            std::cout << "Closing connection with client FD: " << client_fd << "\n";
             break;
         }
     }
 
+    // cleanup
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
     close(client_fd);
 
-    std::cout << "Worker thread finished for client with FD: " << client_fd << "\n";
+    std::cout
+        << "Worker thread finished for client with FD: "
+        << client_fd
+        << "\n";
 }

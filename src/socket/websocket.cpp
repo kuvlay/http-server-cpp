@@ -9,23 +9,39 @@
 #include "websocket_frame.hpp"
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 constexpr int BASE64_SHA1_SIZE = 32;
 constexpr const char *GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-bool recvAll(int client_fd, void *buffer, size_t length){
+bool recvAll(SSL *ssl, void *buffer, size_t length)
+{
     size_t totalReceived = 0;
 
     while (totalReceived < length)
     {
-        ssize_t bytesReceived = recv(
-            client_fd,
+        int bytesReceived = SSL_read(
+            ssl,
             static_cast<char *>(buffer) + totalReceived,
-            length - totalReceived,
-            0);
+            length - totalReceived);
 
         if (bytesReceived <= 0)
+        {
+            int sslError = SSL_get_error(ssl, bytesReceived);
+
+            if (sslError == SSL_ERROR_ZERO_RETURN)
+            {
+                std::cout << "TLS connection closed cleanly\n";
+            }
+            else
+            {
+                std::cerr << "SSL_read failed, error: "
+                          << sslError << "\n";
+            }
+
             return false;
+        }
 
         totalReceived += bytesReceived;
     }
@@ -33,19 +49,26 @@ bool recvAll(int client_fd, void *buffer, size_t length){
     return true;
 }
 
-bool sendAll(int client_fd, const void *buffer, size_t length){
+bool sendAll(SSL *ssl, const void *buffer, size_t length)
+{
     size_t totalSent = 0;
 
     while (totalSent < length)
     {
-        ssize_t bytesSent = send(
-            client_fd,
+        int bytesSent = SSL_write(
+            ssl,
             static_cast<const char *>(buffer) + totalSent,
-            length - totalSent,
-            0);
+            length - totalSent);
 
         if (bytesSent <= 0)
+        {
+            int sslError = SSL_get_error(ssl, bytesSent);
+
+            std::cerr << "SSL_write failed, error: "
+                      << sslError << "\n";
+
             return false;
+        }
 
         totalSent += bytesSent;
     }
@@ -53,10 +76,12 @@ bool sendAll(int client_fd, const void *buffer, size_t length){
     return true;
 }
 
-bool readHeader(int client_fd, WebSocketFrame &frame){
+bool readHeader(SSL *ssl, WebSocketFrame &frame)
+{
     uint8_t header[2];
 
-    if(!recvAll(client_fd,header,2))return false;
+    if (!recvAll(ssl, header, 2))
+        return false;
 
     frame.fin = (header[0] >> 7) & 1;
     frame.opcode = header[0] & 0x0F;
@@ -65,7 +90,8 @@ bool readHeader(int client_fd, WebSocketFrame &frame){
     return true;
 }
 
-bool readExtendedLen(int client_fd, WebSocketFrame &frame){
+bool readExtendedLen(SSL *ssl, WebSocketFrame &frame)
+{
     if (frame.payloadLength <= 125)
         return true;
 
@@ -73,7 +99,8 @@ bool readExtendedLen(int client_fd, WebSocketFrame &frame){
     {
         uint16_t length;
 
-        if(!recvAll(client_fd, &length, sizeof(length))) return false;
+        if (!recvAll(ssl, &length, sizeof(length)))
+            return false;
 
         frame.payloadLength = ntohs(length);
 
@@ -82,7 +109,8 @@ bool readExtendedLen(int client_fd, WebSocketFrame &frame){
 
     uint64_t length;
 
-    if(!recvAll(client_fd, &length, sizeof(length))) return false;
+    if (!recvAll(ssl, &length, sizeof(length)))
+        return false;
 
     uint8_t *bytes = reinterpret_cast<uint8_t *>(&length);
 
@@ -98,42 +126,48 @@ bool readExtendedLen(int client_fd, WebSocketFrame &frame){
     return true;
 }
 
-bool readMaskingKey(int client_fd, WebSocketFrame &frame){
-
-    return recvAll(client_fd, frame.maskingKey.data(), frame.maskingKey.size());
+bool readMaskingKey(SSL *ssl, WebSocketFrame &frame)
+{
+    return recvAll(ssl, frame.maskingKey.data(), frame.maskingKey.size());
 }
 
-bool readPayload(int client_fd, WebSocketFrame &frame){
+bool readPayload(SSL *ssl, WebSocketFrame &frame)
+{
     frame.payload.resize(frame.payloadLength);
 
-    if(frame.payload.empty()) return true;
-    return recvAll(client_fd, frame.payload.data(), frame.payload.size());
-    
+    if (frame.payload.empty())
+        return true;
+    return recvAll(ssl, frame.payload.data(), frame.payload.size());
 }
 
-void unmaskPayload(WebSocketFrame &frame){
+void unmaskPayload(WebSocketFrame &frame)
+{
     for (size_t i = 0; i < frame.payload.size(); i++)
         frame.payload[i] ^= frame.maskingKey[i % 4];
 }
 
-bool sendFrame(int client_fd, uint8_t opcode, const std::vector<uint8_t> &payload){
+bool sendFrame(SSL *ssl, uint8_t opcode, const std::vector<uint8_t> &payload)
+{
     uint8_t header[2];
 
     header[0] = 0x80 | opcode;
-    
+
     uint64_t length = payload.size();
 
-    if(length <= 125)
+    if (length <= 125)
     {
         header[1] = length;
-        if(!sendAll(client_fd, header, 2))return false;
+        if (!sendAll(ssl, header, 2))
+            return false;
     }
     else if (length <= 65535)
     {
         header[1] = 126;
         uint16_t extendedLen = htons(length);
-        if(!sendAll(client_fd, header, 2))return false;
-        if(!sendAll(client_fd, &extendedLen, sizeof(extendedLen))) return false;
+        if (!sendAll(ssl, header, 2))
+            return false;
+        if (!sendAll(ssl, &extendedLen, sizeof(extendedLen)))
+            return false;
     }
     else
     {
@@ -149,21 +183,20 @@ bool sendFrame(int client_fd, uint8_t opcode, const std::vector<uint8_t> &payloa
         extendedLength[6] = (length >> 8) & 0xFF;
         extendedLength[7] = length & 0xFF;
 
-        if (!sendAll(client_fd, header, 2))
+        if (!sendAll(ssl, header, 2))
             return false;
 
         if (!sendAll(
-                client_fd,
+                ssl,
                 extendedLength,
                 sizeof(extendedLength)))
             return false;
     }
-    
 
     if (!payload.empty())
     {
         if (!sendAll(
-                client_fd,
+                ssl,
                 payload.data(),
                 payload.size()))
             return false;
@@ -171,16 +204,20 @@ bool sendFrame(int client_fd, uint8_t opcode, const std::vector<uint8_t> &payloa
     return true;
 }
 
-bool readFrame(int client_fd,WebSocketFrame &frame){
-    
+bool readFrame(SSL *ssl, WebSocketFrame &frame)
+{
 
-    if(!readHeader(client_fd, frame)) return false;
-    if(!readExtendedLen(client_fd, frame))return false;
-    
+    if (!readHeader(ssl, frame))
+        return false;
+    if (!readExtendedLen(ssl, frame))
+        return false;
+
     if (frame.masked)
-        if(!readMaskingKey(client_fd, frame)) return false;
-    
-    if(!readPayload(client_fd, frame)) return false;
+        if (!readMaskingKey(ssl, frame))
+            return false;
+
+    if (!readPayload(ssl, frame))
+        return false;
 
     if (frame.masked)
         unmaskPayload(frame);
@@ -188,26 +225,26 @@ bool readFrame(int client_fd,WebSocketFrame &frame){
     return true;
 }
 
-bool handleFrame(int client_fd, const WebSocketFrame &frame){
+bool handleFrame(SSL *ssl, const WebSocketFrame &frame)
+{
     uint8_t opcode = frame.opcode;
 
     switch (opcode)
     {
     case 0x1: // text frame
         std::cout << "Received text frame: " << std::string(frame.payload.begin(), frame.payload.end()) << std::endl;
-        sendFrame(client_fd, opcode, frame.payload);
+        sendFrame(ssl, opcode, frame.payload);
         break;
     case 0x2: // binary frame
         std::cout << "Received binary frame of size: " << frame.payload.size() << std::endl;
         break;
     case 0x8: // connection close
         std::cout << "Received close frame" << std::endl;
-        sendFrame(client_fd,0x8,frame.payload);
-        close(client_fd);
+        sendFrame(ssl, 0x8, frame.payload);
         return false;
     case 0x9: // ping
         std::cout << "Received ping frame" << std::endl;
-        sendFrame(client_fd, 0xA, frame.payload); // send pong
+        sendFrame(ssl, 0xA, frame.payload); // send pong
         break;
     case 0xA: // pong
         std::cout << "Received pong frame" << std::endl;
@@ -219,7 +256,8 @@ bool handleFrame(int client_fd, const WebSocketFrame &frame){
     return true;
 }
 
-HttpResponse buildWebSocketHandshakeResponse(const HttpRequest &request){
+HttpResponse buildWebSocketHandshakeResponse(const HttpRequest &request)
+{
     HttpResponse response;
 
     response.version = "HTTP/1.1";
@@ -235,7 +273,8 @@ HttpResponse buildWebSocketHandshakeResponse(const HttpRequest &request){
     return response;
 }
 
-std::string generateWebSocketAcceptKey(const std::string &clientKey){
+std::string generateWebSocketAcceptKey(const std::string &clientKey)
+{
     // append guid
     std::string key = clientKey + GUID;
     // sha1
@@ -249,7 +288,8 @@ std::string generateWebSocketAcceptKey(const std::string &clientKey){
     return std::string(reinterpret_cast<char *>(output));
 }
 
-bool isWebSocketUpgrade(const HttpRequest &parsedRequest){
+bool isWebSocketUpgrade(const HttpRequest &parsedRequest)
+{
     if (
         parsedRequest.method == "GET" &&
         parsedRequest.headers.count("Upgrade") &&
@@ -264,12 +304,15 @@ bool isWebSocketUpgrade(const HttpRequest &parsedRequest){
     return false;
 }
 
-void handleWebSocket(int client_fd){
+void handleWebSocket(SSL *ssl)
+{
     while (true)
     {
-        WebSocketFrame frame; 
-        if(!readFrame(client_fd,frame)) break;
+        WebSocketFrame frame;
+        if (!readFrame(ssl, frame))
+            break;
 
-        if(!handleFrame(client_fd, frame)) break;
+        if (!handleFrame(ssl, frame))
+            break;
     }
 }

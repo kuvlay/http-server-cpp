@@ -5,6 +5,8 @@
 #include <thread>
 #include <unistd.h>
 #include "http/http.hpp"
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 int main(int argc, char **argv)
 {
@@ -46,6 +48,31 @@ int main(int argc, char **argv)
     return 1;
   }
 
+  SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
+  if (ctx == nullptr)
+  {
+    std::cerr << "Failed to create ssl_ctx\n";
+    return 1;
+  }
+
+  if (SSL_CTX_use_certificate_file(ctx, "certs/server.crt", SSL_FILETYPE_PEM) <= 0)
+  {
+    std::cerr << "Failed to load Server certs\n";
+    return 1;
+  }
+
+  if (SSL_CTX_use_PrivateKey_file(ctx, "certs/server.key", SSL_FILETYPE_PEM) <= 0)
+  {
+    std::cerr << "Failed to load server private key\n";
+    return 1;
+  }
+
+  if (SSL_CTX_check_private_key(ctx) <= 0)
+  {
+    std::cerr << "Server certificate and private key do not match\n";
+    return 1;
+  }
+
   // my 2nd socket for client connection
   struct sockaddr_in client_addr;
   int client_addr_len = sizeof(client_addr);
@@ -57,16 +84,32 @@ int main(int argc, char **argv)
     directory = argv[2];
   std::cout << "Directory = " << directory << '\n';
 
-  // check for all clients/server doesnt close connection byself
+  // check for all clients/server, doesnt close connection byself
   while (true)
   {
     int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, (socklen_t *)&client_addr_len);
     std::cout << "Accepted connected\n";
 
+    SSL *ssl = SSL_new(ctx);
+    if (ssl == nullptr)
+    {
+      std::cerr << "Failed to create SSL object\n";
+      close(client_fd);
+      continue;
+    }
+
+    if (SSL_set_fd(ssl, client_fd) <= 0)
+    {
+      std::cerr << "Failed to attach SSL to client socket\n";
+      SSL_free(ssl);
+      close(client_fd);
+      continue;
+    }
+
+    std::cout << "SSL object created for client FD: " << client_fd << "\n";
+
     std::cout << "Worker Thread created for client with FD: " << client_fd << "\n";
-
-    std::thread worker(wthread_handleClient, client_fd, directory);
-
+    std::thread worker(wthread_handleClient, client_fd, ssl, directory);
     worker.detach();
   }
 

@@ -7,6 +7,6 @@ g++ -Isrc \
 	src/file/file.cpp \
 	src/gzip/gzip.cpp \
 	src/socket/websocket.cpp \
-	-o server -pthread -lz -lcrypto || exit 1
+	-o server -pthread -lz -lssl -lcrypto || exit 1
 
 ./server --directory /tmp/http-files/
